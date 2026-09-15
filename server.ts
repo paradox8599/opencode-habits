@@ -208,7 +208,9 @@ function parseCommand(rawText: string): ParsedCommand {
 async function handleCommand(ctx: any, sessionID: string, rawText: string, maxItems: number): Promise<void> {
   const reply = async (text: string) => {
     try {
-      await ctx.session.synthetic({ sessionID, text })
+      // TUI 只显示带 description 的 synthetic 消息（rows.ts 的过滤规则），
+      // 且渲染的是 description 而非 text——不传就只落盘、看不见。
+      await ctx.session.synthetic({ sessionID, text, description: text })
     } catch (error) {
       log("synthetic 发送失败：", errorText(error))
     }
