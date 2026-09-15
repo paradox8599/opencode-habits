@@ -368,3 +368,121 @@ export function describeSuppressed(portrait: Portrait): string {
   if (!portrait.suppressed.length) return "（空）"
   return portrait.suppressed.map((item) => `- ${item.text}（${item.reason} · ${item.date}）`).join("\n")
 }
+
+export interface LintIssue {
+  level: "error" | "warn"
+  line?: number
+  message: string
+}
+
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+const SECTION_RE = /^## (.+)$/
+
+function truncateForMessage(text: string, max = 60): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
+// 校验画像文件的格式与自洽性：返回全部问题（空数组 = 干净）。
+// 比 parsePortrait 严格：解析器会静默丢弃的行，这里都要报出来。
+export function lintPortrait(md: string): LintIssue[] {
+  const issues: LintIssue[] = []
+  const sections = new Set<string>()
+  const ids = new Map<string, number>()
+  const activeTexts = new Map<string, number>()
+  const suppressedTexts = new Map<string, number>()
+  const lines = md.split(/\r?\n/)
+  let section: string | null = null
+  let inComment = false
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index].trim()
+    const lineNo = index + 1
+    if (!line) continue
+    if (inComment) {
+      if (line.includes("-->")) inComment = false
+      continue
+    }
+    if (line.startsWith("<!--")) {
+      if (!line.includes("-->")) inComment = true
+      continue
+    }
+    const sectionMatch = SECTION_RE.exec(line)
+    if (sectionMatch) {
+      const name = sectionMatch[1].trim()
+      section = name
+      if (sections.has(name)) issues.push({ level: "warn", line: lineNo, message: `重复的分节：${name}` })
+      sections.add(name)
+      if (name !== "已抑制" && !isCategory(name)) {
+        issues.push({ level: "warn", line: lineNo, message: `未知分节：${name}（其中的条目会被忽略）` })
+      }
+      continue
+    }
+    if (line.startsWith("#")) continue
+    if (!line.startsWith("- ")) {
+      issues.push({ level: "warn", line: lineNo, message: `无法识别的行（写盘时会被丢弃）：${truncateForMessage(line)}` })
+      continue
+    }
+    const match = ENTRY_RE.exec(line)
+    if (!match) {
+      issues.push({ level: "error", line: lineNo, message: `条目缺少合法元数据注释：${truncateForMessage(line)}` })
+      continue
+    }
+    const [, text, id, metaRaw] = match
+    const meta = new Map<string, string>()
+    for (const pair of metaRaw.matchAll(/([a-z]+)=([^\s]+)/g)) meta.set(pair[1], pair[2])
+    if (section === null) {
+      issues.push({ level: "warn", line: lineNo, message: `条目不在任何分节内：${truncateForMessage(text)}` })
+    }
+    if (ids.has(id)) {
+      issues.push({ level: "error", line: lineNo, message: `重复的条目 id：${id}（第 ${ids.get(id)} 行已出现）` })
+    } else {
+      ids.set(id, lineNo)
+    }
+    if (text.replace(/\s+/g, " ").trim() !== text) {
+      issues.push({ level: "warn", line: lineNo, message: "描述含多余空白" })
+    }
+    if (text.length > MAX_TEXT_LENGTH) {
+      issues.push({ level: "warn", line: lineNo, message: `描述超过 ${MAX_TEXT_LENGTH} 字` })
+    }
+    const key = normalize(text)
+    if (section === "已抑制") {
+      const date = meta.get("suppressed") ?? ""
+      if (!DATE_RE.test(date)) {
+        issues.push({ level: "warn", line: lineNo, message: `已抑制条目缺少合法日期：${date || "（缺失）"}` })
+      }
+      if (!/^[a-z][a-z-]*$/.test(meta.get("reason") ?? "")) {
+        issues.push({ level: "warn", line: lineNo, message: "已抑制条目缺少合法 reason" })
+      }
+      if (activeTexts.has(key)) {
+        issues.push({ level: "warn", line: lineNo, message: "同一描述同时存在于条目与已抑制" })
+      }
+      suppressedTexts.set(key, lineNo)
+      continue
+    }
+    if (section !== null && !isCategory(section)) continue
+    const confidence = Number(meta.get("conf"))
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+      issues.push({ level: "error", line: lineNo, message: `置信度非法：${meta.get("conf") ?? "（缺失）"}` })
+    }
+    const seen = Number.parseInt(meta.get("seen") ?? "", 10)
+    if (!Number.isInteger(seen) || seen < 1) {
+      issues.push({ level: "warn", line: lineNo, message: `seen 非法：${meta.get("seen") ?? "（缺失）"}` })
+    }
+    const last = meta.get("last") ?? ""
+    if (!DATE_RE.test(last)) {
+      issues.push({ level: "warn", line: lineNo, message: `last 日期非法：${last || "（缺失）"}` })
+    }
+    if (activeTexts.has(key)) {
+      issues.push({ level: "warn", line: lineNo, message: `重复的描述（与第 ${activeTexts.get(key)} 行重复）` })
+    } else {
+      activeTexts.set(key, lineNo)
+    }
+    if (suppressedTexts.has(key)) {
+      issues.push({ level: "warn", line: lineNo, message: "同一描述同时存在于条目与已抑制" })
+    }
+  }
+  for (const category of CATEGORIES) {
+    if (!sections.has(category)) issues.push({ level: "warn", message: `缺少分节：## ${category}` })
+  }
+  if (!sections.has("已抑制")) issues.push({ level: "warn", message: "缺少分节：## 已抑制" })
+  return issues
+}

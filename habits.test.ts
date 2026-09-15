@@ -5,6 +5,7 @@ import {
   cleanText,
   describePortrait,
   describeSuppressed,
+  lintPortrait,
   makeId,
   parseOpsJson,
   parsePortrait,
@@ -317,5 +318,74 @@ describe("describePortrait / describeSuppressed", () => {
       portrait([entry({ id: "a1b2", text: "偏好显式类型", category: "编码", confidence: 0.8, seen: 3, last: "2026-09-14" })]),
     )
     expect(text).toBe("- [a1b2] 编码：偏好显式类型（conf 0.80 · seen 3 · last 2026-09-14）")
+  })
+})
+
+describe("lintPortrait", () => {
+  const valid = () =>
+    serializePortrait(
+      portrait(
+        [entry({ id: "a1b2", text: "偏好显式类型", category: "编码", confidence: 0.8, seen: 3, last: "2026-09-14" })],
+        [{ id: "c3d4", text: "使用 X 库", reason: "user-forget", date: "2026-09-13" }],
+      ),
+    )
+
+  test("干净画像无问题", () => {
+    expect(lintPortrait(valid())).toEqual([])
+    expect(lintPortrait(serializePortrait(portrait([])))).toEqual([])
+  })
+
+  test("条目缺少元数据注释报错误", () => {
+    const md = ["## 编码", "- 手写但没有元数据的条目"].join("\n")
+    const issues = lintPortrait(md)
+    expect(issues.some((issue) => issue.level === "error" && issue.message.includes("缺少合法元数据注释"))).toBe(true)
+  })
+
+  test("非法置信度报错误，非法 seen/last 报警告", () => {
+    const broken = ["## 编码", "- 某个习惯 <!-- id=a1b2 conf=9 seen=abc last=昨天 -->"].join("\n")
+    const issues = lintPortrait(broken)
+    expect(issues.some((issue) => issue.level === "error" && issue.message.includes("置信度非法"))).toBe(true)
+    expect(issues.some((issue) => issue.level === "warn" && issue.message.includes("seen 非法"))).toBe(true)
+    expect(issues.some((issue) => issue.level === "warn" && issue.message.includes("last 日期非法"))).toBe(true)
+  })
+
+  test("重复 id 报错误，重复描述报警告", () => {
+    const md = [
+      "## 编码",
+      "- 习惯一 <!-- id=a1b2 conf=0.50 seen=1 last=2026-09-14 -->",
+      "- 习惯二 <!-- id=a1b2 conf=0.50 seen=1 last=2026-09-14 -->",
+      "- 习惯一 <!-- id=d4e5 conf=0.50 seen=1 last=2026-09-14 -->",
+    ].join("\n")
+    const issues = lintPortrait(md)
+    expect(issues.some((issue) => issue.level === "error" && issue.message.includes("重复的条目 id"))).toBe(true)
+    expect(issues.some((issue) => issue.level === "warn" && issue.message.includes("重复的描述"))).toBe(true)
+  })
+
+  test("未知分节与缺失分节报警告", () => {
+    const md = ["## 编码", "- 习惯 <!-- id=a1b2 conf=0.50 seen=1 last=2026-09-14 -->", "## 编程"].join("\n")
+    const issues = lintPortrait(md)
+    expect(issues.some((issue) => issue.message.includes("未知分节：编程"))).toBe(true)
+    expect(issues.some((issue) => issue.message.includes("缺少分节：## 已抑制"))).toBe(true)
+    expect(issues.some((issue) => issue.message.includes("缺少分节：## UI 设计"))).toBe(true)
+  })
+
+  test("无法识别的行报警告，多行注释不误报", () => {
+    const md = ["<!-- 多行", "注释 -->", "一些手写说明", "## 编码"].join("\n")
+    const issues = lintPortrait(md)
+    expect(issues.some((issue) => issue.message.includes("无法识别的行（写盘时会被丢弃）：一些手写说明"))).toBe(true)
+    expect(issues.some((issue) => issue.message.includes("多行"))).toBe(false)
+  })
+
+  test("同一描述同时存在于条目与已抑制报警告", () => {
+    const md = [
+      "## 编码",
+      "- 使用 X 库 <!-- id=a1b2 conf=0.50 seen=1 last=2026-09-14 -->",
+      "## 已抑制",
+      "- 使用 X 库 <!-- id=c3d4 suppressed=2026-09-13 reason=user-forget -->",
+      "- 日期残缺 <!-- id=e5f6 suppressed=昨天 reason=user-forget -->",
+    ].join("\n")
+    const issues = lintPortrait(md)
+    expect(issues.some((issue) => issue.message.includes("同时存在于条目与已抑制"))).toBe(true)
+    expect(issues.some((issue) => issue.message.includes("已抑制条目缺少合法日期"))).toBe(true)
   })
 })

@@ -14,6 +14,7 @@ import {
   buildInjection,
   describePortrait,
   describeSuppressed,
+  lintPortrait,
   parseOpsJson,
   parsePortrait,
   serializePortrait,
@@ -34,6 +35,7 @@ const USAGE = [
   "用法：",
   "- /habits          查看两份习惯画像",
   "- /habits refresh  从当前会话提炼并更新画像",
+  "- /habits check    校验两份画像文件的格式",
   "- /habits forget <关键词或 4 位 id>  永久遗忘（写入抑制清单，防止重新学回）",
 ].join("\n")
 
@@ -182,7 +184,7 @@ async function injectionFor(ctx: any, sessionID: string, maxItems: number): Prom
 // 命令
 
 interface ParsedCommand {
-  action: "view" | "refresh" | "forget" | "usage"
+  action: "view" | "refresh" | "check" | "forget" | "usage"
   keywords: string[]
 }
 
@@ -196,6 +198,7 @@ function parseCommand(rawText: string): ParsedCommand {
   const [head, ...rest] = tokens
   if (!head || head === "view" || head === "list") return { action: "view", keywords: [] }
   if (head === "refresh") return { action: "refresh", keywords: [] }
+  if (head === "check") return { action: "check", keywords: [] }
   if (head === "forget" && rest.length) return { action: "forget", keywords: rest }
   return { action: "usage", keywords: [] }
 }
@@ -222,6 +225,10 @@ async function handleCommand(ctx: any, sessionID: string, rawText: string, maxIt
     if (command.action === "refresh") {
       messageCounts.set(sessionID, 0)
       await queuedRefine(() => refresh(ctx, sessionID, reply))
+      return
+    }
+    if (command.action === "check") {
+      await check(ctx, sessionID, reply)
       return
     }
     if (command.action === "forget") {
@@ -252,6 +259,36 @@ function viewText(globalPortrait: Portrait, projectPortrait: Portrait, baseDir: 
   lines.push(`注入上限：每份画像按置信度取前 ${maxItems} 条；/habits refresh 提炼本会话；/habits forget 永久遗忘。`)
   const text = lines.join("\n")
   return text.length > VIEW_TEXT_LIMIT ? `${text.slice(0, VIEW_TEXT_LIMIT)}\n…（输出过长已截断）` : text
+}
+
+async function check(ctx: any, sessionID: string, reply: (text: string) => Promise<void>): Promise<void> {
+  const baseDir = await projectDirOf(ctx, sessionID)
+  const projectPath = projectHabitsPath(baseDir)
+  const [globalText, projectText] = await Promise.all([readTextFile(GLOBAL_PATH), readTextFile(projectPath)])
+  const report = (label: string, path: string, text: string | undefined): string => {
+    if (text === undefined) return `${label}（${path}）：未创建`
+    const issues = lintPortrait(text)
+    const portrait = parsePortrait(text)
+    const head = `${label}（${path}）：${portrait.entries.length} 条 · 已抑制 ${portrait.suppressed.length} 条 · ${issues.length} 个问题`
+    if (!issues.length) return `${head}\n- 无问题`
+    const detail = issues.map(
+      (issue) =>
+        `- [${issue.level === "error" ? "错误" : "警告"}]${issue.line ? ` 第 ${issue.line} 行` : ""}：${issue.message}`,
+    )
+    return [head, ...detail].join("\n")
+  }
+  const lines = ["习惯画像格式检查", report("全局", GLOBAL_PATH, globalText), "", report("项目", projectPath, projectText)]
+  if (globalText !== undefined && projectText !== undefined) {
+    const globalPortrait = parsePortrait(globalText)
+    const projectPortrait = parsePortrait(projectText)
+    const globalIds = new Set([...globalPortrait.entries, ...globalPortrait.suppressed].map((item) => item.id))
+    const clashes = [...projectPortrait.entries, ...projectPortrait.suppressed].filter((item) => globalIds.has(item.id))
+    if (clashes.length) {
+      lines.push("", `跨文件问题：项目与全局存在重复 id：${clashes.map((item) => item.id).join("、")}`)
+    }
+  }
+  const text = lines.join("\n")
+  await reply(text.length > VIEW_TEXT_LIMIT ? `${text.slice(0, VIEW_TEXT_LIMIT)}\n…（输出过长已截断）` : text)
 }
 
 function summarizeChanges(label: string, result: ApplyResult): string {
