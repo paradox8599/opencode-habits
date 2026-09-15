@@ -15,12 +15,14 @@ import {
   describePortrait,
   describeSuppressed,
   lintPortrait,
+  parseModelRef,
   parseOpsJson,
   parsePortrait,
   serializePortrait,
   suppressMatches,
   type ApplyResult,
   type Change,
+  type ModelRef,
   type Portrait,
   type Scope,
 } from "./habits.ts"
@@ -427,10 +429,11 @@ function buildRefinePrompt(input: {
   ].join("\n")
 }
 
-async function resolveModel(ctx: any): Promise<{ providerID: string; id: string } | undefined> {
-  const configured = ctx.options?.model
-  if (configured && typeof configured.providerID === "string" && typeof configured.id === "string") {
-    return { providerID: configured.providerID, id: configured.id }
+async function resolveModel(ctx: any): Promise<ModelRef | undefined> {
+  const configured = parseModelRef(ctx.options?.model)
+  if (configured) return configured
+  if (ctx.options?.model !== undefined && ctx.options?.model !== null) {
+    log("options.model 无法解析（支持 \"provider/model\" 或 {providerID, id}）：", JSON.stringify(ctx.options.model))
   }
   try {
     const fallback = await ctx.catalog.model.default()
@@ -447,13 +450,9 @@ async function resolveModel(ctx: any): Promise<{ providerID: string; id: string 
 // 提炼必须走会话内生成：部分 provider（如本机的 o）要求请求带上会话路由头，
 // 无会话的 ctx.generate.text 会被网关拒绝。为保持"便宜模型提炼"，插件为每个项目
 // 维护一个专用的后台会话（无历史消息），用 session.generate 做瞬时生成。
-async function ensureRefineSession(
-  ctx: any,
-  baseDir: string,
-  model: { providerID: string; id: string },
-): Promise<string> {
+async function ensureRefineSession(ctx: any, baseDir: string, model: ModelRef): Promise<string> {
   const key = `refine-session:${baseDir}`
-  const modelTag = `${model.providerID}/${model.id}`
+  const modelTag = `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`
   const stored = (await ctx.storage.get(key)) as { id?: string; model?: string } | undefined
   if (stored?.id) {
     try {
@@ -472,12 +471,7 @@ async function ensureRefineSession(
   return created.id
 }
 
-async function refineText(
-  ctx: any,
-  baseDir: string,
-  model: { providerID: string; id: string },
-  prompt: string,
-): Promise<string> {
+async function refineText(ctx: any, baseDir: string, model: ModelRef, prompt: string): Promise<string> {
   const sessionID = await serialized(() => ensureRefineSession(ctx, baseDir, model))
   const result = await ctx.session.generate({ sessionID, prompt })
   return result?.text ?? ""

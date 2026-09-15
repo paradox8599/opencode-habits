@@ -7,6 +7,7 @@ import {
   describeSuppressed,
   lintPortrait,
   makeId,
+  parseModelRef,
   parseOpsJson,
   parsePortrait,
   serializePortrait,
@@ -40,6 +41,51 @@ function counterNewId(): (used: ReadonlySet<string>) => string {
     return id
   }
 }
+
+describe("parseModelRef", () => {
+  test("字符串形式 provider/model", () => {
+    expect(parseModelRef("o/deepseek-v4.1-flash")).toEqual({ providerID: "o", id: "deepseek-v4.1-flash" })
+    expect(parseModelRef("  o/glm-5.3-flash  ")).toEqual({ providerID: "o", id: "glm-5.3-flash" })
+    expect(parseModelRef("openrouter/anthropic/claude-sonnet-5")).toEqual({
+      providerID: "openrouter",
+      id: "anthropic/claude-sonnet-5",
+    })
+  })
+
+  test("字符串带变体", () => {
+    expect(parseModelRef("o/glm-5.3#think")).toEqual({ providerID: "o", id: "glm-5.3", variant: "think" })
+    expect(parseModelRef("o/glm-5.3#")).toEqual({ providerID: "o", id: "glm-5.3" })
+  })
+
+  test("对象形式", () => {
+    expect(parseModelRef({ providerID: "o", id: "glm-5.3" })).toEqual({ providerID: "o", id: "glm-5.3" })
+    expect(parseModelRef({ providerID: "o", id: "glm-5.3", variant: "think" })).toEqual({
+      providerID: "o",
+      id: "glm-5.3",
+      variant: "think",
+    })
+  })
+
+  test("非法输入返回 undefined", () => {
+    const invalid: unknown[] = [
+      "",
+      "   ",
+      "noslash",
+      "/x",
+      "x/",
+      "#variant",
+      "x/#v",
+      42,
+      null,
+      undefined,
+      {},
+      { providerID: "o" },
+      { id: "x" },
+      { providerID: "", id: "x" },
+    ]
+    for (const value of invalid) expect(parseModelRef(value)).toBeUndefined()
+  })
+})
 
 describe("parsePortrait / serializePortrait", () => {
   test("空文件解析为空画像", () => {

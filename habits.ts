@@ -375,6 +375,39 @@ export interface LintIssue {
   message: string
 }
 
+export interface ModelRef {
+  providerID: string
+  id: string
+  variant?: string
+}
+
+// 解析提炼模型配置：兼容 "provider/model"、带 "#variant" 的字符串，以及 {providerID, id} 对象。
+export function parseModelRef(value: unknown): ModelRef | undefined {
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>
+    const providerID = record.providerID
+    const id = record.id
+    if (typeof providerID !== "string" || !providerID || typeof id !== "string" || !id) return undefined
+    const variant = typeof record.variant === "string" && record.variant ? record.variant : undefined
+    return variant ? { providerID, id, variant } : { providerID, id }
+  }
+  if (typeof value !== "string") return undefined
+  let text = value.trim()
+  if (!text) return undefined
+  let variant: string | undefined
+  const hash = text.lastIndexOf("#")
+  if (hash >= 0) {
+    variant = text.slice(hash + 1).trim() || undefined
+    text = text.slice(0, hash).trim()
+  }
+  const slash = text.indexOf("/")
+  if (slash <= 0 || slash === text.length - 1) return undefined
+  const providerID = text.slice(0, slash).trim()
+  const id = text.slice(slash + 1).trim()
+  if (!providerID || !id) return undefined
+  return variant ? { providerID, id, variant } : { providerID, id }
+}
+
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const SECTION_RE = /^## (.+)$/
 
