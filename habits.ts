@@ -338,6 +338,15 @@ export function parseOpsJson(raw: string): OpsParseResult {
   return { ops, errors }
 }
 
+// /habits 的输出消息带这个 metadata 标记：TUI 里可见，但不进模型上下文。
+// server.ts 用 resume:false 投递，context 钩子按标记把消息从 event.messages 里剥掉。
+export const OUTPUT_METADATA = { habitProfile: { kind: "output" } } as const
+
+export function isOutputMessage(message: { metadata?: unknown }): boolean {
+  const metadata = message.metadata as { habitProfile?: { kind?: unknown } } | undefined
+  return metadata?.habitProfile?.kind === OUTPUT_METADATA.habitProfile.kind
+}
+
 export function buildInjection(globalPortrait: Portrait, projectPortrait: Portrait, maxItems: number): string {
   const limit = Math.max(0, Math.floor(maxItems))
   const section = (title: string, portrait: Portrait): string | undefined => {

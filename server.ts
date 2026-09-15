@@ -14,7 +14,9 @@ import {
   buildInjection,
   describePortrait,
   describeSuppressed,
+  isOutputMessage,
   lintPortrait,
+  OUTPUT_METADATA,
   parseModelRef,
   parseOpsJson,
   parsePortrait,
@@ -210,7 +212,14 @@ async function handleCommand(ctx: any, sessionID: string, rawText: string, maxIt
     try {
       // TUI 只显示带 description 的 synthetic 消息（rows.ts 的过滤规则），
       // 且渲染的是 description 而非 text——不传就只落盘、看不见。
-      await ctx.session.synthetic({ sessionID, text, description: text })
+      // resume: false 只投递给界面、不唤醒模型；metadata 标记供 context 钩子把消息剥出模型上下文。
+      await ctx.session.synthetic({
+        sessionID,
+        text,
+        description: text,
+        resume: false,
+        metadata: OUTPUT_METADATA,
+      })
     } catch (error) {
       log("synthetic 发送失败：", errorText(error))
     }
@@ -536,6 +545,10 @@ export default {
     registrations.push(
       await ctx.session.hook("context", async (event: any) => {
         try {
+          // /habits 的输出消息会留在会话历史里，但不该进入模型上下文——按 metadata 标记剥掉。
+          const messages = Array.isArray(event.messages) ? event.messages : []
+          const kept = messages.filter((message: any) => !isOutputMessage(message))
+          if (kept.length !== messages.length) messages.splice(0, messages.length, ...kept)
           const text = await injectionFor(ctx, event.sessionID, maxItems)
           if (text) event.system.push({ type: "text", text })
         } catch (error) {

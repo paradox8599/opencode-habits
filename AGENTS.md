@@ -34,7 +34,8 @@ opencode V2 插件 `habit-profile`：从会话中提炼用户习惯，维护全�
 
 - 写画像必须走 `serialized()` 串行队列 + `writePortraitFile`（临时文件 + rename），缓存按 mtime+size 失效；新增写路径别绕开
 - 提炼必须用 `ctx.session.generate` 在每项目一个的后台会话里跑（`ensureRefineSession`，storage key `refine-session:<baseDir>`，会话标题「习惯画像 · 后台提炼（插件自动创建）」）：provider `o` 的网关要求会话路由头，无会话的 `ctx.generate.text` 会被拒
-- TUI 只渲染带 `description` 的 synthetic 消息：`ctx.session.synthetic({ sessionID, text, description: text })`，漏传就只落盘、什么都看不见
+- `/habits` 输出走「只显示、不进模型」通道：`ctx.session.synthetic({ ..., description: text, resume: false, metadata: OUTPUT_METADATA })`；漏传 `description` 在 TUI 里看不见，漏传 `resume: false` 会白跑一次模型回复
+- 上面这条通道靠 context 钩子里的 `isOutputMessage` 过滤把输出消息从 `event.messages` 剥掉，否则它会进入后续请求的上下文
 - 子会话（子代理，有 `parentID`）不参与提炼
 - 「add 只接受 explicit/correction」只写在提炼提示词里，代码不拦（`parseOp` 缺省 `ambient`，`applyOps` 照收）——别以为代码保证了它
 

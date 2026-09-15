@@ -5,8 +5,10 @@ import {
   cleanText,
   describePortrait,
   describeSuppressed,
+  isOutputMessage,
   lintPortrait,
   makeId,
+  OUTPUT_METADATA,
   parseModelRef,
   parseOpsJson,
   parsePortrait,
@@ -433,5 +435,17 @@ describe("lintPortrait", () => {
     const issues = lintPortrait(md)
     expect(issues.some((issue) => issue.message.includes("同时存在于条目与已抑制"))).toBe(true)
     expect(issues.some((issue) => issue.message.includes("已抑制条目缺少合法日期"))).toBe(true)
+  })
+})
+
+describe("isOutputMessage", () => {
+  test("识别 /habits 输出消息的 metadata 标记", () => {
+    expect(isOutputMessage({ metadata: OUTPUT_METADATA })).toBe(true)
+  })
+
+  test("没有标记或标记不匹配时返回 false", () => {
+    expect(isOutputMessage({})).toBe(false)
+    expect(isOutputMessage({ metadata: { habitProfile: { kind: "别的值" } } })).toBe(false)
+    expect(isOutputMessage({ metadata: { 其他插件: { kind: "output" } } })).toBe(false)
   })
 })
