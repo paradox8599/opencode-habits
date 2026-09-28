@@ -3,6 +3,8 @@ import {
   applyOps,
   buildInjection,
   cleanText,
+  describeOp,
+  describePending,
   describePortrait,
   describeSuppressed,
   isOutputMessage,
@@ -11,11 +13,15 @@ import {
   OUTPUT_METADATA,
   parseModelRef,
   parseOpsJson,
+  parsePending,
   parsePortrait,
+  selectPending,
+  serializePending,
   serializePortrait,
   suppressMatches,
   type Entry,
   type Op,
+  type PendingItem,
   type Portrait,
 } from "./habits.ts"
 
@@ -435,6 +441,118 @@ describe("lintPortrait", () => {
     const issues = lintPortrait(md)
     expect(issues.some((issue) => issue.message.includes("同时存在于条目与已抑制"))).toBe(true)
     expect(issues.some((issue) => issue.message.includes("已抑制条目缺少合法日期"))).toBe(true)
+  })
+})
+
+describe("describeOp", () => {
+  const globalPortrait = portrait([entry({ id: "a1b2", text: "偏好显式类型" })])
+  const projectPortrait = portrait([entry({ id: "c3d4", text: "提交信息用英文" })])
+
+  test("add 展示分类、scope 与信号", () => {
+    const op: Op = { op: "add", scope: "global", category: "编码", text: "偏好显式类型", signal: "explicit" }
+    expect(describeOp(op, portrait([]), portrait([]))).toBe("新增 · 全局 · 编码：偏好显式类型（explicit）")
+  })
+
+  test("reinforce / amend / contradict 带上目标条目原文", () => {
+    expect(describeOp({ op: "reinforce", scope: "global", id: "a1b2", signal: "correction" }, globalPortrait, portrait([]))).toBe(
+      "强化 · 全局 · [a1b2] 偏好显式类型（correction）",
+    )
+    expect(describeOp({ op: "amend", scope: "global", id: "a1b2", text: "偏好显式类型与校验" }, globalPortrait, portrait([]))).toBe(
+      "修订 · 全局 · [a1b2] 偏好显式类型 → 偏好显式类型与校验",
+    )
+    expect(describeOp({ op: "contradict", scope: "project", id: "c3d4" }, portrait([]), projectPortrait)).toBe(
+      "削弱 · 项目 · [c3d4] 提交信息用英文",
+    )
+  })
+
+  test("目标条目已不存在时给出提示", () => {
+    expect(describeOp({ op: "contradict", scope: "global", id: "ffff" }, portrait([]), portrait([]))).toBe(
+      "削弱 · 全局 · [ffff] （该条目已不存在）",
+    )
+  })
+})
+
+describe("parsePending / serializePending", () => {
+  test("序列化后解析可还原", () => {
+    const items: PendingItem[] = [
+      {
+        baseDir: "/tmp/proj",
+        summary: "新增 · 全局 · 编码：偏好显式类型（explicit）",
+        op: { op: "add", scope: "global", category: "编码", text: "偏好显式类型", signal: "explicit" },
+      },
+      {
+        baseDir: "/tmp/proj",
+        summary: "削弱 · 项目 · [c3d4] 提交信息用英文",
+        op: { op: "contradict", scope: "project", id: "c3d4" },
+      },
+    ]
+    expect(parsePending(serializePending(items))).toEqual(items)
+  })
+
+  test("坏输入与坏条目被静默丢弃", () => {
+    expect(parsePending("不是 json")).toEqual([])
+    expect(parsePending('{"items":[]}')).toEqual([])
+    const raw = JSON.stringify([
+      { baseDir: "", op: { op: "contradict", scope: "global", id: "a1b2" } },
+      { baseDir: "/tmp", op: { op: "explode", scope: "global", id: "a1b2" } },
+      { baseDir: "/tmp", op: { op: "contradict", scope: "global", id: "a1b2" } },
+    ])
+    const items = parsePending(raw)
+    expect(items).toHaveLength(1)
+    expect(items[0].summary).toBe("削弱 · 全局 · [a1b2] （该条目已不存在）")
+  })
+})
+
+describe("selectPending", () => {
+  const pendingItem = (n: number): PendingItem => ({
+    baseDir: "/tmp",
+    summary: `条目 ${n}`,
+    op: { op: "contradict", scope: "global", id: `a1b${n}` },
+  })
+  const items: PendingItem[] = [1, 2, 3].map(pendingItem)
+
+  test("按 1 起算的编号选择，保序去重", () => {
+    const result = selectPending(items, ["3", "1", "1"])
+    expect(result.taken.map((item) => item.summary)).toEqual(["条目 1", "条目 3"])
+    expect(result.rest.map((item) => item.summary)).toEqual(["条目 2"])
+    expect(result.errors).toEqual([])
+  })
+
+  test("all 全选", () => {
+    const result = selectPending(items, ["all"])
+    expect(result.taken).toHaveLength(3)
+    expect(result.rest).toHaveLength(0)
+  })
+
+  test("缺编号 / 非法编号 / 越界都报错", () => {
+    expect(selectPending(items, []).errors).toEqual(["缺少编号"])
+    const bad = selectPending(items, ["x", "9"])
+    expect(bad.taken).toHaveLength(0)
+    expect(bad.errors).toEqual(["无法识别的编号：x", "编号超出范围：9"])
+  })
+})
+
+describe("describePending", () => {
+  test("空列表占位", () => {
+    expect(describePending([])).toBe("（无）")
+  })
+
+  test("编号输出，project scope 标出来源项目", () => {
+    const items: PendingItem[] = [
+      {
+        baseDir: "/a/b",
+        summary: "新增 · 全局 · 编码：x（explicit）",
+        op: { op: "add", scope: "global", category: "编码", text: "x", signal: "explicit" },
+      },
+      {
+        baseDir: "/Users/para/Repos/opencode-habits",
+        summary: "削弱 · 项目 · [a1b2] y",
+        op: { op: "contradict", scope: "project", id: "a1b2" },
+      },
+    ]
+    expect(describePending(items)).toBe(
+      ["1. 新增 · 全局 · 编码：x（explicit）", "2. 削弱 · 项目 · [a1b2] y（项目 opencode-habits）"].join("\n"),
+    )
   })
 })
 

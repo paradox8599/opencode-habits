@@ -4,7 +4,7 @@
 // （~/.config/opencode/habits.md 与 <项目>/.opencode/habits.md），并在模型请求前注入。
 // 只持久化提炼后的画像条目，不保存任何对话原文。
 //
-// 命令：/habits 查看 · /habits refresh 提炼本会话 · /habits forget <关键词|id> 永久遗忘
+// 命令：/habits 查看 · /habits refresh 提炼本会话 · /habits approve|reject 处理待审批 · /habits forget <关键词|id> 永久遗忘
 
 import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -12,6 +12,8 @@ import { dirname, join } from "node:path"
 import {
   applyOps,
   buildInjection,
+  describeOp,
+  describePending,
   describePortrait,
   describeSuppressed,
   isOutputMessage,
@@ -19,17 +21,23 @@ import {
   OUTPUT_METADATA,
   parseModelRef,
   parseOpsJson,
+  parsePending,
   parsePortrait,
+  selectPending,
+  serializePending,
   serializePortrait,
   suppressMatches,
   type ApplyResult,
   type Change,
   type ModelRef,
+  type Op,
+  type PendingItem,
   type Portrait,
-  type Scope,
 } from "./habits.ts"
 
 const GLOBAL_PATH = join(homedir(), ".config", "opencode", "habits.md")
+// 提炼产出先落到这里等审批；approve 后才写进画像文件。
+const PENDING_PATH = join(homedir(), ".config", "opencode", "habits.pending.json")
 const TRANSCRIPT_BUDGET = 48_000
 const DEFAULT_MAX_ITEMS = 40
 const DEFAULT_AUTO_EVERY = 10
@@ -37,8 +45,10 @@ const VIEW_TEXT_LIMIT = 6_000
 
 const USAGE = [
   "用法：",
-  "- /habits          查看两份习惯画像",
-  "- /habits refresh  从当前会话提炼并更新画像",
+  "- /habits          查看两份习惯画像与待审批条目",
+  "- /habits refresh  从当前会话提炼（结果进入待审批，不直接写入画像）",
+  "- /habits approve <编号…|all>  采纳待审批条目并写入画像",
+  "- /habits reject <编号…|all>   丢弃待审批条目",
   "- /habits check    校验两份画像文件的格式",
   "- /habits forget <关键词或 4 位 id>  永久遗忘（写入抑制清单，防止重新学回）",
 ].join("\n")
@@ -140,6 +150,22 @@ async function readTextFile(path: string): Promise<string | undefined> {
   }
 }
 
+async function readPendingFile(): Promise<PendingItem[]> {
+  const raw = await readTextFile(PENDING_PATH)
+  return raw === undefined ? [] : parsePending(raw)
+}
+
+async function writePendingFile(items: readonly PendingItem[]): Promise<void> {
+  const temp = `${PENDING_PATH}.tmp-${process.pid}`
+  await mkdir(dirname(PENDING_PATH), { recursive: true })
+  await writeFile(temp, serializePending(items), "utf8")
+  await rename(temp, PENDING_PATH)
+}
+
+function limitOutput(text: string): string {
+  return text.length > VIEW_TEXT_LIMIT ? `${text.slice(0, VIEW_TEXT_LIMIT)}\n…（输出过长已截断）` : text
+}
+
 // ---------------------------------------------------------------------------
 // 项目定位：优先插件实例的规范项目根，会话跨项目时回退到会话所在目录
 
@@ -188,7 +214,7 @@ async function injectionFor(ctx: any, sessionID: string, maxItems: number): Prom
 // 命令
 
 interface ParsedCommand {
-  action: "view" | "refresh" | "check" | "forget" | "usage"
+  action: "view" | "refresh" | "check" | "forget" | "approve" | "reject" | "usage"
   keywords: string[]
 }
 
@@ -204,6 +230,7 @@ function parseCommand(rawText: string): ParsedCommand {
   if (head === "refresh") return { action: "refresh", keywords: [] }
   if (head === "check") return { action: "check", keywords: [] }
   if (head === "forget" && rest.length) return { action: "forget", keywords: rest }
+  if ((head === "approve" || head === "reject") && rest.length) return { action: head, keywords: rest }
   return { action: "usage", keywords: [] }
 }
 
@@ -228,11 +255,12 @@ async function handleCommand(ctx: any, sessionID: string, rawText: string, maxIt
     const command = parseCommand(rawText)
     if (command.action === "view") {
       const baseDir = await projectDirOf(ctx, sessionID)
-      const [globalPortrait, projectPortrait] = await Promise.all([
+      const [globalPortrait, projectPortrait, pending] = await Promise.all([
         readPortraitFile(GLOBAL_PATH),
         readPortraitFile(projectHabitsPath(baseDir)),
+        readPendingFile(),
       ])
-      await reply(viewText(globalPortrait, projectPortrait, baseDir, maxItems))
+      await reply(viewText(globalPortrait, projectPortrait, pending, baseDir, maxItems))
       return
     }
     if (command.action === "refresh") {
@@ -248,6 +276,10 @@ async function handleCommand(ctx: any, sessionID: string, rawText: string, maxIt
       await forget(ctx, sessionID, command.keywords, reply)
       return
     }
+    if (command.action === "approve" || command.action === "reject") {
+      await review(command.action, command.keywords, reply)
+      return
+    }
     await reply(USAGE)
   } catch (error) {
     log("命令处理失败：", errorText(error))
@@ -255,8 +287,18 @@ async function handleCommand(ctx: any, sessionID: string, rawText: string, maxIt
   }
 }
 
-function viewText(globalPortrait: Portrait, projectPortrait: Portrait, baseDir: string, maxItems: number): string {
+function viewText(
+  globalPortrait: Portrait,
+  projectPortrait: Portrait,
+  pending: readonly PendingItem[],
+  baseDir: string,
+  maxItems: number,
+): string {
   const lines = ["习惯画像", ""]
+  if (pending.length) {
+    lines.push(`待审批（${pending.length} 条，尚未写入画像）：`)
+    lines.push(describePending(pending), "")
+  }
   lines.push(`全局（${GLOBAL_PATH}）：共 ${globalPortrait.entries.length} 条，已抑制 ${globalPortrait.suppressed.length} 条`)
   lines.push(describePortrait(globalPortrait), "")
   lines.push(
@@ -269,9 +311,10 @@ function viewText(globalPortrait: Portrait, projectPortrait: Portrait, baseDir: 
   if (projectPortrait.suppressed.length) {
     lines.push("已抑制（项目）：", describeSuppressed(projectPortrait), "")
   }
-  lines.push(`注入上限：每份画像按置信度取前 ${maxItems} 条；/habits refresh 提炼本会话；/habits forget 永久遗忘。`)
-  const text = lines.join("\n")
-  return text.length > VIEW_TEXT_LIMIT ? `${text.slice(0, VIEW_TEXT_LIMIT)}\n…（输出过长已截断）` : text
+  lines.push(
+    `注入上限：每份画像按置信度取前 ${maxItems} 条；/habits refresh 提炼本会话；/habits approve|reject 处理待审批；/habits forget 永久遗忘。`,
+  )
+  return limitOutput(lines.join("\n"))
 }
 
 async function check(ctx: any, sessionID: string, reply: (text: string) => Promise<void>): Promise<void> {
@@ -301,7 +344,7 @@ async function check(ctx: any, sessionID: string, reply: (text: string) => Promi
     }
   }
   const text = lines.join("\n")
-  await reply(text.length > VIEW_TEXT_LIMIT ? `${text.slice(0, VIEW_TEXT_LIMIT)}\n…（输出过长已截断）` : text)
+  await reply(limitOutput(text))
 }
 
 function summarizeChanges(label: string, result: ApplyResult): string {
@@ -346,6 +389,65 @@ async function forget(
   const lines = [`已遗忘 ${removedGlobal.length + removedProject.length} 条（写入抑制清单，后续提炼不会重新登记）：`]
   for (const item of removedGlobal) lines.push(`- 全局 ${item}`)
   for (const item of removedProject) lines.push(`- 项目 ${item}`)
+  await reply(lines.join("\n"))
+}
+
+// 处理待审批条目：approve 按 scope 写进对应画像，reject 直接丢弃；两者都走串行队列。
+async function review(
+  action: "approve" | "reject",
+  tokens: readonly string[],
+  reply: (text: string) => Promise<void>,
+): Promise<void> {
+  const today = todayString()
+  const errors: string[] = []
+  const summaries: string[] = []
+  let taken: PendingItem[] = []
+  let remaining = 0
+  await serialized(async () => {
+    const items = await readPendingFile()
+    const selection = selectPending(items, tokens)
+    errors.push(...selection.errors)
+    taken = selection.taken
+    if (!taken.length) {
+      remaining = items.length
+      return
+    }
+    if (action === "approve") {
+      const globalOps = taken.filter((item) => item.op.scope === "global").map((item) => item.op)
+      if (globalOps.length) {
+        const result = applyOps(await readPortraitFile(GLOBAL_PATH), globalOps, today)
+        if (result.changes.length) await writePortraitFile(GLOBAL_PATH, result.portrait)
+        summaries.push(summarizeChanges("全局", result))
+      }
+      const byDir = new Map<string, Op[]>()
+      for (const item of taken) {
+        if (item.op.scope !== "project") continue
+        byDir.set(item.baseDir, [...(byDir.get(item.baseDir) ?? []), item.op])
+      }
+      for (const [dir, ops] of byDir) {
+        const path = projectHabitsPath(dir)
+        const result = applyOps(await readPortraitFile(path), ops, today)
+        if (result.changes.length) await writePortraitFile(path, result.portrait)
+        summaries.push(summarizeChanges(`项目（${dir}）`, result))
+      }
+    }
+    await writePendingFile(selection.rest)
+    remaining = selection.rest.length
+  })
+
+  const lines = errors.map((message) => `待审批操作有误：${message}`)
+  if (!taken.length) {
+    if (!errors.length) lines.push(`没有匹配的待审批条目（当前共 ${remaining} 条）。`)
+    await reply(lines.join("\n"))
+    return
+  }
+  lines.push(`${action === "approve" ? "已采纳" : "已丢弃"} ${taken.length} 条：`)
+  if (action === "approve") {
+    for (const summary of summaries) lines.push(`- ${summary}`)
+  } else {
+    for (const item of taken) lines.push(`- ${item.summary}`)
+  }
+  lines.push(`剩余待审批 ${remaining} 条。`)
   await reply(lines.join("\n"))
 }
 
@@ -512,18 +614,20 @@ async function refresh(ctx: any, sessionID: string, reply: (text: string) => Pro
     await reply("习惯画像：本会话没有可提炼的新内容。")
     return
   }
-  const today = todayString()
-  const at = (scope: Scope) => ops.filter((op) => op.scope === scope)
-  let globalResult: ApplyResult | undefined
-  let projectResult: ApplyResult | undefined
+  const pending: PendingItem[] = ops.map((op) => ({
+    baseDir,
+    summary: describeOp(op, globalPortrait, projectPortrait),
+    op,
+  }))
+  let all: PendingItem[] = []
   await serialized(async () => {
-    globalResult = applyOps(await readPortraitFile(GLOBAL_PATH), at("global"), today)
-    projectResult = applyOps(await readPortraitFile(projectPath), at("project"), today)
-    if (globalResult.changes.length) await writePortraitFile(GLOBAL_PATH, globalResult.portrait)
-    if (projectResult.changes.length) await writePortraitFile(projectPath, projectResult.portrait)
+    all = [...(await readPendingFile()), ...pending]
+    await writePendingFile(all)
   })
-  const lines = ["习惯画像已刷新", summarizeChanges("全局", globalResult!), summarizeChanges("项目", projectResult!)]
-  await reply(lines.join("\n"))
+  log(`提炼完成，待审批 ${all.length} 条（本次新增 ${pending.length} 条）`)
+  const lines = [`习惯画像：已提炼 ${pending.length} 条待审批（尚未写入画像）。`, describePending(all)]
+  lines.push("用 /habits approve <编号…|all> 采纳，/habits reject <编号…|all> 丢弃。")
+  await reply(limitOutput(lines.join("\n")))
 }
 
 // ---------------------------------------------------------------------------
@@ -593,7 +697,7 @@ export default {
       await ctx.command.transform((editor: any) => {
         editor.add({
           name: "habits",
-          description: "用户习惯画像：查看 / refresh 提炼 / forget 遗忘",
+          description: "用户习惯画像：查看 / refresh 提炼 / approve|reject 审批 / forget 遗忘",
           execute: async ({ sessionID, prompt }: any) => {
             await handleCommand(ctx, sessionID, prompt?.text ?? "", maxItems)
           },

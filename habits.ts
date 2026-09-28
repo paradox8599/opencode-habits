@@ -338,6 +338,114 @@ export function parseOpsJson(raw: string): OpsParseResult {
   return { ops, errors }
 }
 
+// ---------------------------------------------------------------------------
+// 待审批暂存：提炼产出的 op 先攒在这里，等 /habits approve 才真正写进画像。
+
+export interface PendingItem {
+  /** 该 op 所属项目的根目录（project scope 写盘时用）。 */
+  baseDir: string
+  /** 提炼时算好的可读描述，供列表展示（画像变化后也不会失真）。 */
+  summary: string
+  op: Op
+}
+
+const SCOPE_LABEL: Record<Scope, string> = { global: "全局", project: "项目" }
+
+function entryText(op: Op, globalPortrait: Portrait, projectPortrait: Portrait): string | undefined {
+  if (op.op === "add") return undefined
+  const portrait = op.scope === "global" ? globalPortrait : projectPortrait
+  return portrait.entries.find((entry) => entry.id === op.id)?.text
+}
+
+// 把单个 op 说成人话：新增/强化/修订/削弱 + scope + 目标条目。
+export function describeOp(op: Op, globalPortrait: Portrait, projectPortrait: Portrait): string {
+  const scope = SCOPE_LABEL[op.scope]
+  if (op.op === "add") return `新增 · ${scope} · ${op.category}：${op.text}（${op.signal}）`
+  const target = entryText(op, globalPortrait, projectPortrait) ?? "（该条目已不存在）"
+  if (op.op === "reinforce") return `强化 · ${scope} · [${op.id}] ${target}（${op.signal}）`
+  if (op.op === "amend") return `修订 · ${scope} · [${op.id}] ${target} → ${op.text}`
+  return `削弱 · ${scope} · [${op.id}] ${target}`
+}
+
+export function serializePending(items: readonly PendingItem[]): string {
+  return `${JSON.stringify(items, null, 2)}\n`
+}
+
+// 宽松解析：坏条目静默丢弃，读不动的整个文件当作空列表。
+export function parsePending(raw: string): PendingItem[] {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  const list = Array.isArray(parsed) ? parsed : (parsed as { items?: unknown } | null)?.items
+  if (!Array.isArray(list)) return []
+  const items: PendingItem[] = []
+  for (const element of list) {
+    if (typeof element !== "object" || element === null) continue
+    const record = element as Record<string, unknown>
+    const baseDir = typeof record.baseDir === "string" ? record.baseDir : ""
+    if (!baseDir) continue
+    const op = parseOp(record.op, [])
+    if (!op) continue
+    const summary =
+      typeof record.summary === "string" && record.summary
+        ? record.summary
+        : describeOp(op, EMPTY_PORTRAIT, EMPTY_PORTRAIT)
+    items.push({ baseDir, summary, op })
+  }
+  return items
+}
+
+function projectLabel(baseDir: string): string {
+  const parts = baseDir.split(/[/\\]/).filter(Boolean)
+  return parts[parts.length - 1] ?? baseDir
+}
+
+// 带编号的待审批列表；project scope 额外标出来源项目。
+export function describePending(items: readonly PendingItem[]): string {
+  if (!items.length) return "（无）"
+  return items
+    .map((item, index) => {
+      const suffix = item.op.scope === "project" ? `（项目 ${projectLabel(item.baseDir)}）` : ""
+      return `${index + 1}. ${item.summary}${suffix}`
+    })
+    .join("\n")
+}
+
+export interface PendingSelection {
+  taken: PendingItem[]
+  rest: PendingItem[]
+  errors: string[]
+}
+
+// 解析 approve / reject 的编号参数：支持 "1 3" 与 "all"，编号按 1 起算。
+export function selectPending(items: readonly PendingItem[], tokens: readonly string[]): PendingSelection {
+  const normalized = tokens.map((token) => token.trim().toLowerCase()).filter(Boolean)
+  if (!normalized.length) return { taken: [], rest: [...items], errors: ["缺少编号"] }
+  if (normalized.includes("all")) return { taken: [...items], rest: [], errors: [] }
+  const errors: string[] = []
+  const picked = new Set<number>()
+  for (const token of normalized) {
+    if (!/^\d+$/.test(token)) {
+      errors.push(`无法识别的编号：${token}`)
+      continue
+    }
+    const index = Number.parseInt(token, 10) - 1
+    if (index < 0 || index >= items.length) {
+      errors.push(`编号超出范围：${token}`)
+      continue
+    }
+    picked.add(index)
+  }
+  return {
+    taken: items.filter((_, index) => picked.has(index)),
+    rest: items.filter((_, index) => !picked.has(index)),
+    errors,
+  }
+}
+
 // /habits 的输出消息带这个 metadata 标记：TUI 里可见，但不进模型上下文。
 // server.ts 用 resume:false 投递，context 钩子按标记把消息从 event.messages 里剥掉。
 export const OUTPUT_METADATA = { habitProfile: { kind: "output" } } as const

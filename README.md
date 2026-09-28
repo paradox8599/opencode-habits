@@ -44,8 +44,10 @@ opencode 插件 `habit-profile`：从历史会话中提炼你的使用习惯，�
 
 | 命令 | 作用 |
 | --- | --- |
-| `/habits`（等同于 `/habits view`） | 查看全局与项目两份画像 |
-| `/habits refresh` | 立刻从当前会话提炼并更新画像 |
+| `/habits`（等同于 `/habits view`） | 查看全局与项目两份画像、以及待审批条目 |
+| `/habits refresh` | 立刻从当前会话提炼；结果进入待审批，不直接写入画像 |
+| `/habits approve <编号…\|all>` | 采纳待审批条目并写入画像 |
+| `/habits reject <编号…\|all>` | 丢弃待审批条目 |
 | `/habits check` | 校验两份画像文件的格式与一致性 |
 | `/habits forget <关键词或 4 位 id>` | 永久遗忘：写入抑制清单，防止被重新学回 |
 
@@ -63,6 +65,7 @@ opencode 插件 `habit-profile`：从历史会话中提炼你的使用习惯，�
 
 - 全局画像：`~/.config/opencode/habits.md`
 - 项目画像：`<项目>/.opencode/habits.md`
+- 待审批暂存：`~/.config/opencode/habits.pending.json`（提炼产出先落这里，`/habits approve` 后才写进画像；纯机器状态，一般不用手改）
 
 ```markdown
 # 用户习惯画像
@@ -83,8 +86,9 @@ opencode 插件 `habit-profile`：从历史会话中提炼你的使用习惯，�
 ## 工作原理
 
 1. 注入：每次模型请求前，把两份画像按置信度排序、截断后拼进系统提示。
-2. 提炼：每 N 条用户消息（或手动 `/habits refresh`）在后台取最近会话记录（最多 48000 字符，跳过 `/habits` 命令本身）、项目根的 `AGENTS.md` 和现有画像，让模型输出一组 JSON 操作，再合并进画像。项目 `AGENTS.md` 里已显式写明的规则不会被重复登记。
-3. 写盘：读改写全程串行，写入用临时文件 + rename 原子替换，避免并发写坏文件。
+2. 提炼：每 N 条用户消息（或手动 `/habits refresh`）在后台取最近会话记录（最多 48000 字符，跳过 `/habits` 命令本身）、项目根的 `AGENTS.md` 和现有画像，让模型输出一组 JSON 操作，先存进待审批暂存，不直接改画像。项目 `AGENTS.md` 里已显式写明的规则不会被重复登记。
+3. 审批：`/habits view` 列出待审批条目的编号，`/habits approve <编号…|all>` 采纳、`/habits reject <编号…|all>` 丢弃。采纳时按 scope 合并进对应的全局 / 项目画像。
+4. 写盘：读改写全程串行，写入用临时文件 + rename 原子替换，避免并发写坏文件。
 
 模型可以输出的操作有 4 种：`add`（新增）、`reinforce`（强化）、`amend`（改措辞）、`contradict`（降置信度，低到 0.15 以下移入已抑制）。重复新增会自动转为强化；已抑制的条目不会被重新学回。置信度初始值按来源区分：用户明确说的 0.8、纠正 0.2、顺带提及 0.1。
 
