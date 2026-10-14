@@ -403,15 +403,16 @@ function projectLabel(baseDir: string): string {
   return parts[parts.length - 1] ?? baseDir
 }
 
+// 单条待审批的人话描述；project scope 额外标出来源项目。
+export function describePendingItem(item: PendingItem): string {
+  const suffix = item.op.scope === "project" ? `（项目 ${projectLabel(item.baseDir)}）` : ""
+  return `${item.summary}${suffix}`
+}
+
 // 带编号的待审批列表；project scope 额外标出来源项目。
 export function describePending(items: readonly PendingItem[]): string {
   if (!items.length) return "（无）"
-  return items
-    .map((item, index) => {
-      const suffix = item.op.scope === "project" ? `（项目 ${projectLabel(item.baseDir)}）` : ""
-      return `${index + 1}. ${item.summary}${suffix}`
-    })
-    .join("\n")
+  return items.map((item, index) => `${index + 1}. ${describePendingItem(item)}`).join("\n")
 }
 
 export interface PendingSelection {
@@ -444,6 +445,63 @@ export function selectPending(items: readonly PendingItem[], tokens: readonly st
     rest: items.filter((_, index) => !picked.has(index)),
     errors,
   }
+}
+
+export interface PendingDecision {
+  // 1 起算，对应待审批列表的顺序。
+  index: number
+  action: "approve" | "reject"
+}
+
+export interface DecisionSelection {
+  approved: PendingItem[]
+  rejected: PendingItem[]
+  rest: PendingItem[]
+  errors: string[]
+}
+
+// 按编号 + 动作处理待审批条目（弹窗一次性提交用）：未列入 decisions 的保持不动。
+// 同一编号重复出现时最后一个动作为准；越界或非法动作记为错误、不影响其余条目。
+export function selectDecisions(
+  items: readonly PendingItem[],
+  decisions: readonly PendingDecision[],
+): DecisionSelection {
+  const errors: string[] = []
+  const chosen = new Map<number, "approve" | "reject">()
+  for (const decision of decisions) {
+    const index = Math.floor(Number(decision.index))
+    if (!Number.isFinite(index) || index < 1 || index > items.length) {
+      errors.push(`编号超出范围：${decision.index}`)
+      continue
+    }
+    if (decision.action !== "approve" && decision.action !== "reject") {
+      errors.push(`无法识别的动作：${decision.action}`)
+      continue
+    }
+    chosen.set(index - 1, decision.action)
+  }
+  const approved: PendingItem[] = []
+  const rejected: PendingItem[] = []
+  const rest: PendingItem[] = []
+  items.forEach((item, index) => {
+    const action = chosen.get(index)
+    if (action === "approve") approved.push(item)
+    else if (action === "reject") rejected.push(item)
+    else rest.push(item)
+  })
+  return { approved, rejected, rest, errors }
+}
+
+// 待审批列表的内容指纹：list 时算给面板，review 时回传核对，
+// 避免列表在两次调用之间被其它窗口改动导致位置编号错位。
+export function pendingRevision(items: readonly PendingItem[]): string {
+  const text = serializePending(items)
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, "0")
 }
 
 // /habits 的输出消息带这个 metadata 标记：TUI 里可见，但不进模型上下文。

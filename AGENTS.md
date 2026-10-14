@@ -4,14 +4,16 @@ opencode V2 插件 `habit-profile`：从会话中提炼用户习惯，维护全�
 
 ## 命令
 
-- `bun test` — 全部测试（49 个，纯单测，毫秒级）
+- `bun test` — 全部测试（56 个，纯单测，毫秒级）
 - `bun test habits.test.ts` / `bun test -t "applyOps"` — 单文件 / 按名字过滤
 - 没有 lint、typecheck、构建、CI、tsconfig，也没有任何依赖；别发明这些步骤
 
 ## 结构
 
-- `habits.ts` — 纯逻辑：解析 / 序列化 / op 合并 / 注入文本拼装 / 待审批暂存，不碰文件系统
-- `server.ts` — 插件装配与 I/O：hooks、`/habits` 命令、提炼流程、审批流程、原子写盘、缓存
+- `habits.ts` — 纯逻辑：解析 / 序列化 / op 合并 / 注入文本拼装 / 待审批暂存与审批选择，不碰文件系统
+- `server.ts` — 插件装配与 I/O：hooks、`/habits` 命令、提炼流程、审批流程、RPC 注册、原子写盘、缓存
+- `rpc.ts` — 审批面板的 RPC 契约：普通对象（不用 `Rpc.define`），server 与 TUI 各自 import
+- `tui.tsx` — 审批面板的 TUI 入口（`.tsx` 由 opencode 运行时转译，无需构建）
 - `habits.test.ts` — 只测 habits.ts，注入确定性 newId / rand，无磁盘无网络
 - 入口是 `server.ts` 的 `export default { id: "habit-profile", async setup(ctx) }`，`ctx` 全为 `any`（无 @opencode-ai/plugin 依赖）
 - 能放进 habits.ts 的逻辑别写进 server.ts（server.ts 无法单测）
@@ -30,6 +32,20 @@ opencode V2 插件 `habit-profile`：从会话中提炼用户习惯，维护全�
 - `summary` 是提炼时用 `describeOp(op, 全局画像, 项目画像)` 算好的人话描述（含目标条目原文），存下来是为了画像变化后列表不失真
 - `parsePending` 宽松（坏条目静默丢、整个文件读不动当空列表），`serializePending` 写 2 空格缩进的 JSON
 - 提炼只追加、不覆盖；编号是列表位置（1 起算），approve/reject 后重排——`selectPending` 负责解析 `1 3` / `all`
+- 弹窗一次性提交走另一条路：`selectDecisions(items, decisions)` 按 `{ index, action }` 分流，未列入 decisions 的条目原样留在 `rest`（支持分几次处理）；同编号重复出现以最后一个动作为准
+
+## 审批面板（RPC 契约）
+
+- `rpc.ts` 的 `HABITS_RPC` 是**普通对象**，不是 `Rpc.define` 的返回值：RPC 按 `definition.id` 字符串路由，与对象身份无关，所以 server / TUI 各自 import 同一个 `rpc.ts` 即可，不需要 `node_modules`（本插件目录没有依赖）
+- `methods` 里的两个方法必须同时给 `input` 与 `output`（普通 JSON Schema），`events` 字段不可省（写 `{}`）
+- server 端 `ctx.rpc.register(HABITS_RPC, { list, review })`：`list` 返回已渲染好的 `{ items, revision }`；`review` 收 `{ revision, decisions }`，返回 `{ approved, rejected, remaining, errors }`
+- `revision` 是 `pendingRevision(items)`（habits.ts，FNV-1a 指纹）算出的列表指纹：`list` 时下发、`review` 时回传，server 在串行块里核对，不匹配则整批拒绝（`errors` 带「列表已变化」），避免面板打开后列表被其它窗口改动导致位置编号错位
+- 两条 RPC 方法都复用 `resolvePending`（内部走 `serialized()`），读改写在一个串行块里完成，避免读两次文件导致编号错位
+- TUI 侧 `context.client.rpc(HABITS_RPC)`，返回对象是按 `definition.id` 从 HTTP 路由回 server 的（不依赖对象身份）
+- `tui.tsx` 用 `session.panel` 承载面板（不是自定义 dialog）：宿主负责尺寸/焦点/全屏，插件只画内容；命令用 `context.ui.panel.open("habit-profile.review")` 打开，`session.panel` 的 render 收 `panel.name` 匹配
+- 面板命令挂在常驻的 `append:"app"` 槽上（`keymap.layer` 必须在组件渲染上下文里调用）；`slash: { name: "habits-panel" }` 且必须带 `id`
+- `.tsx` 由 opencode 运行时用 Bun + babel-preset-solid 转译，**插件在 node_modules 之外时才能直跑**；本仓库是本地路径插件，无需预编译、无需 package.json exports、无需改 tui.jsonc
+- 子会话（子代理，有 `parentID`）不参与提炼
 
 ## 数值语义
 
@@ -51,5 +67,5 @@ opencode V2 插件 `habit-profile`：从会话中提炼用户习惯，维护全�
 ## 运行与生效
 
 - 插件 options：`model`（`"provider/model"` 或对象）、`maxInjectedItems`（默认 40）、`autoEveryNMessages`（默认 10，0 关闭自动提炼）
-- 画像文件：全局 `~/.config/opencode/habits.md`，项目 `<项目>/.opencode/habits.md`，待审批暂存 `~/.config/opencode/habits.pending.json`；用户入口是 `/habits view|refresh|check|forget <关键词|id>` 与 `/habits approve|reject <编号…|all>`，forget 把命中条目移入已抑制
-- 会话加载的是从 GitHub 安装的缓存副本（`~/.cache/opencode/npm/git-opencode-habits-*/<时间戳>/`）：本地改动不会立即生效，端到端验证要靠用户重装 / 重启；推送和改全局配置都超出当前权限
+- 画像文件：全局 `~/.config/opencode/habits.md`，项目 `<项目>/.opencode/habits.md`，待审批暂存 `~/.config/opencode/habits.pending.json`；用户入口是 `/habits view|refresh|check|forget <关键词|id>` 与 `/habits approve|reject <编号…|all>`，forget 把命中条目移入已抑制；TUI 侧另有 `/habits-panel` 斜杠命令打开审批面板
+- 本机 `~/.config/opencode/opencode.jsonc` 的 plugins 指向本地目录 `/Users/para/Repos/opencode-habits`（不是 GitHub），改本地代码在重启 opencode 后即生效；若改回 GitHub 安装形态则加载的是缓存副本（`~/.cache/opencode/npm/git-opencode-habits-*/<时间戳>/`）

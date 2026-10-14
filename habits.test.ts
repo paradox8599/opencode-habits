@@ -5,6 +5,7 @@ import {
   cleanText,
   describeOp,
   describePending,
+  describePendingItem,
   describePortrait,
   describeSuppressed,
   isOutputMessage,
@@ -15,6 +16,8 @@ import {
   parseOpsJson,
   parsePending,
   parsePortrait,
+  pendingRevision,
+  selectDecisions,
   selectPending,
   serializePending,
   serializePortrait,
@@ -553,6 +556,87 @@ describe("describePending", () => {
     expect(describePending(items)).toBe(
       ["1. 新增 · 全局 · 编码：x（explicit）", "2. 削弱 · 项目 · [a1b2] y（项目 opencode-habits）"].join("\n"),
     )
+  })
+})
+
+describe("selectDecisions", () => {
+  const pendingItem = (n: number): PendingItem => ({
+    baseDir: "/tmp",
+    summary: `条目 ${n}`,
+    op: { op: "contradict", scope: "global", id: `a1b${n}` },
+  })
+  const items: PendingItem[] = [1, 2, 3].map(pendingItem)
+
+  test("按编号与动作分流，未列入的保持不动", () => {
+    const result = selectDecisions(items, [
+      { index: 1, action: "approve" },
+      { index: 3, action: "reject" },
+    ])
+    expect(result.approved.map((item) => item.summary)).toEqual(["条目 1"])
+    expect(result.rejected.map((item) => item.summary)).toEqual(["条目 3"])
+    expect(result.rest.map((item) => item.summary)).toEqual(["条目 2"])
+    expect(result.errors).toEqual([])
+  })
+
+  test("同一编号重复出现时最后一个动作为准", () => {
+    const result = selectDecisions(items, [
+      { index: 2, action: "approve" },
+      { index: 2, action: "reject" },
+    ])
+    expect(result.approved).toHaveLength(0)
+    expect(result.rejected.map((item) => item.summary)).toEqual(["条目 2"])
+  })
+
+  test("越界与非法动作报错，不影响其余条目", () => {
+    const result = selectDecisions(items, [
+      { index: 9, action: "approve" },
+      { index: 1, action: "keep" as "approve" },
+      { index: 3, action: "approve" },
+    ])
+    expect(result.approved.map((item) => item.summary)).toEqual(["条目 3"])
+    expect(result.errors).toEqual(["编号超出范围：9", "无法识别的动作：keep"])
+  })
+
+  test("空决策列表时全部保持不动", () => {
+    const result = selectDecisions(items, [])
+    expect(result.rest).toHaveLength(3)
+    expect(result.approved).toHaveLength(0)
+    expect(result.rejected).toHaveLength(0)
+  })
+})
+
+describe("pendingRevision", () => {
+  const item = (n: number): PendingItem => ({
+    baseDir: "/tmp",
+    summary: `条目 ${n}`,
+    op: { op: "contradict", scope: "global", id: `a1b${n}` },
+  })
+
+  test("内容相同则指纹相同，内容变化则指纹变化", () => {
+    expect(pendingRevision([item(1), item(2)])).toBe(pendingRevision([item(1), item(2)]))
+    expect(pendingRevision([item(1), item(2)])).not.toBe(pendingRevision([item(1)]))
+    expect(pendingRevision([item(1), item(2)])).not.toBe(pendingRevision([item(2), item(1)]))
+  })
+
+  test("空列表有稳定指纹", () => {
+    expect(pendingRevision([])).toBe(pendingRevision([]))
+  })
+})
+
+describe("describePendingItem", () => {
+  test("全局条目不带项目后缀，项目条目带来源项目", () => {
+    const global: PendingItem = {
+      baseDir: "/a/b",
+      summary: "新增 · 全局 · 编码：x（explicit）",
+      op: { op: "add", scope: "global", category: "编码", text: "x", signal: "explicit" },
+    }
+    const project: PendingItem = {
+      baseDir: "/Users/para/Repos/opencode-habits",
+      summary: "削弱 · 项目 · [a1b2] y",
+      op: { op: "contradict", scope: "project", id: "a1b2" },
+    }
+    expect(describePendingItem(global)).toBe("新增 · 全局 · 编码：x（explicit）")
+    expect(describePendingItem(project)).toBe("削弱 · 项目 · [a1b2] y（项目 opencode-habits）")
   })
 })
 

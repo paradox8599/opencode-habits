@@ -14,6 +14,7 @@ import {
   buildInjection,
   describeOp,
   describePending,
+  describePendingItem,
   describePortrait,
   describeSuppressed,
   isOutputMessage,
@@ -23,6 +24,8 @@ import {
   parseOpsJson,
   parsePending,
   parsePortrait,
+  pendingRevision,
+  selectDecisions,
   selectPending,
   serializePending,
   serializePortrait,
@@ -34,6 +37,7 @@ import {
   type PendingItem,
   type Portrait,
 } from "./habits.ts"
+import { HABITS_RPC, type ReviewDecision, type ReviewResult } from "./rpc.ts"
 
 const GLOBAL_PATH = join(homedir(), ".config", "opencode", "habits.md")
 // 提炼产出先落到这里等审批；approve 后才写进画像文件。
@@ -392,35 +396,49 @@ async function forget(
   await reply(lines.join("\n"))
 }
 
-// 处理待审批条目：approve 按 scope 写进对应画像，reject 直接丢弃；两者都走串行队列。
-async function review(
-  action: "approve" | "reject",
-  tokens: readonly string[],
-  reply: (text: string) => Promise<void>,
-): Promise<void> {
+// 处理待审批条目：approve 按 scope 写进对应画像，reject 直接丢弃；
+// 读改写全部在一个串行块内完成，resolve 基于同一次读取的列表产出决策。
+interface Resolution {
+  approved: PendingItem[]
+  rejected: PendingItem[]
+  rest: PendingItem[]
+  errors: string[]
+}
+
+interface ReviewOutcome extends ReviewResult {
+  summaries: string[]
+}
+
+async function resolvePending(
+  resolve: (items: readonly PendingItem[]) => Resolution,
+  expectedRevision?: string,
+): Promise<ReviewOutcome> {
   const today = todayString()
-  const errors: string[] = []
   const summaries: string[] = []
-  let taken: PendingItem[] = []
+  let approved = 0
+  let rejected = 0
   let remaining = 0
+  const errors: string[] = []
   await serialized(async () => {
     const items = await readPendingFile()
-    const selection = selectPending(items, tokens)
-    errors.push(...selection.errors)
-    taken = selection.taken
-    if (!taken.length) {
+    if (expectedRevision !== undefined && pendingRevision(items) !== expectedRevision) {
+      errors.push("待审批列表已变化（可能被其它窗口改动），请刷新后重试")
       remaining = items.length
       return
     }
-    if (action === "approve") {
-      const globalOps = taken.filter((item) => item.op.scope === "global").map((item) => item.op)
+    const selection = resolve(items)
+    errors.push(...selection.errors)
+    approved = selection.approved.length
+    rejected = selection.rejected.length
+    if (selection.approved.length) {
+      const globalOps = selection.approved.filter((item) => item.op.scope === "global").map((item) => item.op)
       if (globalOps.length) {
         const result = applyOps(await readPortraitFile(GLOBAL_PATH), globalOps, today)
         if (result.changes.length) await writePortraitFile(GLOBAL_PATH, result.portrait)
         summaries.push(summarizeChanges("全局", result))
       }
       const byDir = new Map<string, Op[]>()
-      for (const item of taken) {
+      for (const item of selection.approved) {
         if (item.op.scope !== "project") continue
         byDir.set(item.baseDir, [...(byDir.get(item.baseDir) ?? []), item.op])
       }
@@ -431,23 +449,41 @@ async function review(
         summaries.push(summarizeChanges(`项目（${dir}）`, result))
       }
     }
-    await writePendingFile(selection.rest)
+    if (selection.approved.length || selection.rejected.length) await writePendingFile(selection.rest)
     remaining = selection.rest.length
   })
+  return { approved, rejected, remaining, errors, summaries }
+}
 
-  const lines = errors.map((message) => `待审批操作有误：${message}`)
+async function review(
+  action: "approve" | "reject",
+  tokens: readonly string[],
+  reply: (text: string) => Promise<void>,
+): Promise<void> {
+  let taken: PendingItem[] = []
+  const outcome = await resolvePending((items) => {
+    const selection = selectPending(items, tokens)
+    taken = selection.taken
+    return {
+      approved: action === "approve" ? selection.taken : [],
+      rejected: action === "reject" ? selection.taken : [],
+      rest: selection.rest,
+      errors: selection.errors,
+    }
+  })
+  const lines = outcome.errors.map((message) => `待审批操作有误：${message}`)
   if (!taken.length) {
-    if (!errors.length) lines.push(`没有匹配的待审批条目（当前共 ${remaining} 条）。`)
+    if (!lines.length) lines.push(`没有匹配的待审批条目（当前共 ${outcome.remaining} 条）。`)
     await reply(lines.join("\n"))
     return
   }
   lines.push(`${action === "approve" ? "已采纳" : "已丢弃"} ${taken.length} 条：`)
   if (action === "approve") {
-    for (const summary of summaries) lines.push(`- ${summary}`)
+    for (const summary of outcome.summaries) lines.push(`- ${summary}`)
   } else {
     for (const item of taken) lines.push(`- ${item.summary}`)
   }
-  lines.push(`剩余待审批 ${remaining} 条。`)
+  lines.push(`剩余待审批 ${outcome.remaining} 条。`)
   await reply(lines.join("\n"))
 }
 
@@ -702,6 +738,26 @@ export default {
             await handleCommand(ctx, sessionID, prompt?.text ?? "", maxItems)
           },
         })
+      }),
+    )
+    registrations.push(
+      await ctx.rpc.register(HABITS_RPC, {
+        list: async () => {
+          const items = await serialized(() => readPendingFile())
+          return {
+            items: items.map((item) => ({ summary: describePendingItem(item) })),
+            revision: pendingRevision(items),
+          }
+        },
+        review: async ({ revision, decisions }: { revision: string; decisions: ReviewDecision[] }) => {
+          const outcome = await resolvePending((items) => selectDecisions(items, decisions), revision)
+          return {
+            approved: outcome.approved,
+            rejected: outcome.rejected,
+            remaining: outcome.remaining,
+            errors: outcome.errors,
+          }
+        },
       }),
     )
     return async () => {
