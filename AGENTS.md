@@ -44,6 +44,8 @@ opencode V2 插件 `habit-profile`：从会话中提炼用户习惯，维护全�
 - TUI 侧 `context.client.rpc(HABITS_RPC)`，返回对象是按 `definition.id` 从 HTTP 路由回 server 的（不依赖对象身份）
 - `tui.tsx` 用 `session.panel` 承载面板（不是自定义 dialog）：宿主负责尺寸/焦点/全屏，插件只画内容；命令用 `context.ui.panel.open("habit-profile.review")` 打开，`session.panel` 的 render 收 `panel.name` 匹配
 - 面板命令挂在常驻的 `append:"app"` 槽上（`keymap.layer` 必须在组件渲染上下文里调用）；`slash: { name: "habits-panel" }` 且必须带 `id`
+- 待审批列表必须放进 `<scrollbox>`（`flexGrow={1} minHeight={0}`）：可能有几百条，直接 `<For>` 进普通 `<box>` 会把面板撑爆、画面错位；每行给 `id={`habit-profile.item.${index()}`}`，光标变化时 `scrollChildIntoView(id)`，且要等一帧（`requestAnimationFrame`）布局才更新
+- 普通 `<box>` 里多个 `<text>` 直接子节点会重叠在同一行（真机与 `@opentui/core/testing` 都能复现），每个 `<text>` 外面包一层 `<box>` 才会上下排列
 - `tui.tsx` 第 1 行必须是 `/** @jsxImportSource ./jsx */`，**不能写 `@opentui/solid`**——这是按 GitHub 包装进 `node_modules` 后唯一的可用形态：
   - opencode 的 `bun-plugin-opentui-runtime-modules` 只改写源码里写死的 import，Bun 按 pragma 事后注入的那句改写不到；而 `@opentui/solid` 的 Solid 变换插件 filter 明确排除 `node_modules`，`node_modules` 内的 `.tsx` 走的是 Bun 原生 JSX
   - 于是注入的 `@opentui/solid/jsx-dev-runtime` 走原生解析去插件自己目录找，而本仓库不声明依赖、npm 什么都不装 → `Cannot find package '@opentui/solid'`（server 半边不受影响，只有 tui 入口报错）

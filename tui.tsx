@@ -10,7 +10,7 @@ import "./jsx/jsx-dev-runtime.ts"
 // 交互：↑/↓ 或 k/j 移动，a 采纳、r 丢弃、空格 循环切换，Enter 一次性提交，Esc 关闭。
 // 只提交被明确标记的条目，未操作的条目保持不动、继续留在待审批里。
 
-import { createSignal, For, onMount, Show } from "solid-js"
+import { createEffect, createSignal, For, onMount, Show } from "solid-js"
 import { HABITS_RPC, type PendingList, type ReviewDecision, type ReviewResult } from "./rpc.ts"
 
 const PANEL_NAME = "habit-profile.review"
@@ -42,6 +42,7 @@ function Panel(props: { context: any; panel: any }) {
   const [marks, setMarks] = createSignal<Record<number, Mark>>({})
   const [cursor, setCursor] = createSignal(0)
   const [busy, setBusy] = createSignal(false)
+  let list: any
 
   const load = async () => {
     try {
@@ -64,6 +65,12 @@ function Panel(props: { context: any; panel: any }) {
 
   onMount(() => {
     void load()
+  })
+
+  // 光标移动后把选中行滚进可视区；布局要等下一帧才更新。
+  createEffect(() => {
+    const id = `habit-profile.item.${cursor()}`
+    requestAnimationFrame(() => list?.scrollChildIntoView(id))
   })
 
   const move = (delta: number) => {
@@ -145,10 +152,12 @@ function Panel(props: { context: any; panel: any }) {
 
   return (
     <box flexDirection="column" width="100%" height="100%">
-      <box flexDirection="row" justifyContent="space-between" paddingBottom={1}>
+      <box flexShrink={0}>
         <text fg={c.accent}>
           <b>待审批习惯</b>
         </text>
+      </box>
+      <box flexShrink={0}>
         <Show
           when={busy()}
           fallback={<text fg={c.muted}>{"↑/↓ 移动 · a 采纳 · r 丢弃 · 空格 切换 · Enter 提交 · Esc 关闭"}</text>}
@@ -156,6 +165,7 @@ function Panel(props: { context: any; panel: any }) {
           <text fg={c.muted}>提交中…</text>
         </Show>
       </box>
+      <box height={1} flexShrink={0} />
       <Show
         when={items()}
         fallback={<text fg={c.muted}>{failed() ? "读取待审批失败。" : "读取中…"}</text>}
@@ -164,19 +174,21 @@ function Panel(props: { context: any; panel: any }) {
           when={(items()?.length ?? 0) > 0}
           fallback={<text fg={c.muted}>没有待审批条目。</text>}
         >
-          <For each={items()}>
-            {(item, index) => {
-              const tag = () => markTag(index())
-              const isCursor = () => cursor() === index()
-              return (
-                <box flexDirection="row" paddingLeft={1}>
-                  <text fg={isCursor() ? c.accent : c.muted}>{isCursor() ? "❯ " : "  "}</text>
-                  <text fg={tag().color}>{`[${tag().label}] `}</text>
-                  <text fg={isCursor() ? c.base : c.muted}>{item.summary}</text>
-                </box>
-              )
-            }}
-          </For>
+          <scrollbox ref={(node) => (list = node)} flexGrow={1} minHeight={0}>
+            <For each={items()}>
+              {(item, index) => {
+                const tag = () => markTag(index())
+                const isCursor = () => cursor() === index()
+                return (
+                  <box id={`habit-profile.item.${index()}`} flexDirection="row" paddingLeft={1}>
+                    <text fg={isCursor() ? c.accent : c.muted}>{isCursor() ? "❯ " : "  "}</text>
+                    <text fg={tag().color}>{`[${tag().label}] `}</text>
+                    <text fg={isCursor() ? c.base : c.muted}>{item.summary}</text>
+                  </box>
+                )
+              }}
+            </For>
+          </scrollbox>
         </Show>
       </Show>
     </box>
