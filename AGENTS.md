@@ -48,6 +48,7 @@ opencode V2 插件 `habit-profile`：从会话中提炼用户习惯，维护全�
   - opencode 的 `bun-plugin-opentui-runtime-modules` 只改写源码里写死的 import，Bun 按 pragma 事后注入的那句改写不到；而 `@opentui/solid` 的 Solid 变换插件 filter 明确排除 `node_modules`，`node_modules` 内的 `.tsx` 走的是 Bun 原生 JSX
   - 于是注入的 `@opentui/solid/jsx-dev-runtime` 走原生解析去插件自己目录找，而本仓库不声明依赖、npm 什么都不装 → `Cannot find package '@opentui/solid'`（server 半边不受影响，只有 tui 入口报错）
   - 指向 `./jsx` 后注入的是相对路径（可解析），`jsx/*.ts` 里 re-export 的那句 `@opentui/solid/jsx-*` 是源码里的 import，会被改写到 opencode 自带的运行时模块，拿到宿主那份 `@opentui/solid`
+  - `tui.tsx` 顶部还必须显式 `import "./jsx/jsx-runtime.ts"` 与 `import "./jsx/jsx-dev-runtime.ts"`（prescan 种子，别当死代码删掉）：opencode 只给「从入口递归扫源码 import 图扫得到的文件」登记精确路径的改写 loader，而 Bun 注入的 jsx 导入是编译期产物、扫不到，少了这两行 shim 就不会被登记，装载时走原生解析 → 仍然报 `Cannot find package '@opentui/solid'`（报错位置会显示 `jsx/jsx-dev-runtime.ts`）
   - 别改成「补 package.json 的 exports + peerDependencies」：那会让 npm 把 `@opentui/*` 装进插件自己的 `node_modules`，Bun 注入的 import 不走改写、用上插件自己那份 OpenTUI，与宿主是两个 renderer 实例，面板会静默不显示（上游 issue #33884）
   - 本地路径安装（插件在 `node_modules` 之外）本来就走 Solid 变换，shim 不参与，两种形态都无需预编译 / exports / 改 tui.jsonc
 - 子会话（子代理，有 `parentID`）不参与提炼

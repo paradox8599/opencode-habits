@@ -1,4 +1,9 @@
 /** @jsxImportSource ./jsx */
+// 这两行是给 opencode 扫描器的 prescan 种子，别当死代码删掉：opencode 只给
+// 「源码 import 图里扫得到的文件」登记改写 loader，而 Bun 注入的 jsx 导入是编译期
+// 产物、扫不到，所以必须显式 import 让 shim 被登记（详见 AGENTS.md）。
+import "./jsx/jsx-runtime.ts"
+import "./jsx/jsx-dev-runtime.ts"
 // habit-profile 的 TUI 入口：一屏面板，逐条处理待审批条目。
 //
 // 打开方式：手动执行斜杠命令 /habits-panel（不自动弹出）。
