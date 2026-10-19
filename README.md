@@ -104,5 +104,5 @@ opencode 插件 `habit-profile`：从历史会话中提炼你的使用习惯，�
 
 - 全部测试：`bun test`（`habits.ts` 的纯逻辑单测，不碰磁盘、无外部依赖）
 - `bun test habits.test.ts` 或 `bun test -t "applyOps"` 可以只跑单文件 / 单个用例
-- 结构：`habits.ts` 纯逻辑（解析 / 序列化 / 合并 / 注入拼装），`server.ts` 插件装配与文件 I/O，`rpc.ts` 审批面板的 RPC 契约，`tui.tsx` 审批面板的 TUI 入口；没有 lint、typecheck、构建步骤
+- 结构：`habits.ts` 纯逻辑（解析 / 序列化 / 合并 / 注入拼装），`server.ts` 插件装配与文件 I/O，`rpc.ts` 审批面板的 RPC 契约，`tui.tsx` 审批面板的 TUI 入口，`jsx/` 是它的 JSX 转发层（详见 `AGENTS.md`）；没有 lint、typecheck、构建步骤
 - 开发约定与已知坑见 `AGENTS.md`

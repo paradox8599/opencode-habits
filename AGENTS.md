@@ -13,7 +13,7 @@ opencode V2 插件 `habit-profile`：从会话中提炼用户习惯，维护全�
 - `habits.ts` — 纯逻辑：解析 / 序列化 / op 合并 / 注入文本拼装 / 待审批暂存与审批选择，不碰文件系统
 - `server.ts` — 插件装配与 I/O：hooks、`/habits` 命令、提炼流程、审批流程、RPC 注册、原子写盘、缓存
 - `rpc.ts` — 审批面板的 RPC 契约：普通对象（不用 `Rpc.define`），server 与 TUI 各自 import
-- `tui.tsx` — 审批面板的 TUI 入口（`.tsx` 由 opencode 运行时转译，无需构建）
+- `tui.tsx` — 审批面板的 TUI 入口（`.tsx` 由 opencode 运行时转译，无需构建）；`jsx/` 是它的 JSX 转发层，别删
 - `habits.test.ts` — 只测 habits.ts，注入确定性 newId / rand，无磁盘无网络
 - 入口是 `server.ts` 的 `export default { id: "habit-profile", async setup(ctx) }`，`ctx` 全为 `any`（无 @opencode-ai/plugin 依赖）
 - 能放进 habits.ts 的逻辑别写进 server.ts（server.ts 无法单测）
@@ -44,7 +44,12 @@ opencode V2 插件 `habit-profile`：从会话中提炼用户习惯，维护全�
 - TUI 侧 `context.client.rpc(HABITS_RPC)`，返回对象是按 `definition.id` 从 HTTP 路由回 server 的（不依赖对象身份）
 - `tui.tsx` 用 `session.panel` 承载面板（不是自定义 dialog）：宿主负责尺寸/焦点/全屏，插件只画内容；命令用 `context.ui.panel.open("habit-profile.review")` 打开，`session.panel` 的 render 收 `panel.name` 匹配
 - 面板命令挂在常驻的 `append:"app"` 槽上（`keymap.layer` 必须在组件渲染上下文里调用）；`slash: { name: "habits-panel" }` 且必须带 `id`
-- `.tsx` 由 opencode 运行时用 Bun + babel-preset-solid 转译，**插件在 node_modules 之外时才能直跑**；本仓库是本地路径插件，无需预编译、无需 package.json exports、无需改 tui.jsonc
+- `tui.tsx` 第 1 行必须是 `/** @jsxImportSource ./jsx */`，**不能写 `@opentui/solid`**——这是按 GitHub 包装进 `node_modules` 后唯一的可用形态：
+  - opencode 的 `bun-plugin-opentui-runtime-modules` 只改写源码里写死的 import，Bun 按 pragma 事后注入的那句改写不到；而 `@opentui/solid` 的 Solid 变换插件 filter 明确排除 `node_modules`，`node_modules` 内的 `.tsx` 走的是 Bun 原生 JSX
+  - 于是注入的 `@opentui/solid/jsx-dev-runtime` 走原生解析去插件自己目录找，而本仓库不声明依赖、npm 什么都不装 → `Cannot find package '@opentui/solid'`（server 半边不受影响，只有 tui 入口报错）
+  - 指向 `./jsx` 后注入的是相对路径（可解析），`jsx/*.ts` 里 re-export 的那句 `@opentui/solid/jsx-*` 是源码里的 import，会被改写到 opencode 自带的运行时模块，拿到宿主那份 `@opentui/solid`
+  - 别改成「补 package.json 的 exports + peerDependencies」：那会让 npm 把 `@opentui/*` 装进插件自己的 `node_modules`，Bun 注入的 import 不走改写、用上插件自己那份 OpenTUI，与宿主是两个 renderer 实例，面板会静默不显示（上游 issue #33884）
+  - 本地路径安装（插件在 `node_modules` 之外）本来就走 Solid 变换，shim 不参与，两种形态都无需预编译 / exports / 改 tui.jsonc
 - 子会话（子代理，有 `parentID`）不参与提炼
 
 ## 数值语义
@@ -68,4 +73,4 @@ opencode V2 插件 `habit-profile`：从会话中提炼用户习惯，维护全�
 
 - 插件 options：`model`（`"provider/model"` 或对象）、`maxInjectedItems`（默认 40）、`autoEveryNMessages`（默认 10，0 关闭自动提炼）
 - 画像文件：全局 `~/.config/opencode/habits.md`，项目 `<项目>/.opencode/habits.md`，待审批暂存 `~/.config/opencode/habits.pending.json`；用户入口是 `/habits view|refresh|check|forget <关键词|id>` 与 `/habits approve|reject <编号…|all>`，forget 把命中条目移入已抑制；TUI 侧另有 `/habits-panel` 斜杠命令打开审批面板
-- 本机 `~/.config/opencode/opencode.jsonc` 的 plugins 指向本地目录 `/Users/para/Repos/opencode-habits`（不是 GitHub），改本地代码在重启 opencode 后即生效；若改回 GitHub 安装形态则加载的是缓存副本（`~/.cache/opencode/npm/git-opencode-habits-*/<时间戳>/`）
+- 本机 `~/.config/opencode/opencode.jsonc` 的 plugins 指向 GitHub 包 `github:paradox8599/opencode-habits`，加载的是 npm 缓存副本（`~/.cache/opencode/npm/git-opencode-habits-*/<时间戳>/node_modules/opencode-habits/`）；改本地代码要在本仓库 commit + push 后重启 opencode，或在配置里临时改回本地目录路径 `/Users/para/Repos/opencode-habits`（本地路径形态下改代码重启即生效）

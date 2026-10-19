@@ -1,4 +1,4 @@
-/** @jsxImportSource @opentui/solid */
+/** @jsxImportSource ./jsx */
 // habit-profile 的 TUI 入口：一屏面板，逐条处理待审批条目。
 //
 // 打开方式：手动执行斜杠命令 /habits-panel（不自动弹出）。
